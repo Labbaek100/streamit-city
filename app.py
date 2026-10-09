@@ -537,19 +537,29 @@ def handle_api_error(e, context="콘텐츠 생성"):
         2. 한글이 함께 복사되었거나 오타가 난 부분을 지우고, Google AI Studio에서 복사한 **순수 영문/숫자 키(`AIzaSy...`로 시작하는 형태)**만 남겨주세요.
         3. 모델 선택을 '직접 입력'으로 하신 경우 한글이 아닌 영문 모델 ID(`gemini-3.8-flash`)를 입력해주세요.
         """)
+    elif "denied access" in err_str.lower() or "your project has been denied" in err_str.lower():
+        st.error("🚫 **Google 프로젝트 접근 차단 오류 (Your project has been denied access)**")
+        st.error("""
+        **🔍 원인:**  
+        Google 측 보안/이용 정책에 의해 현재 API 키가 속한 **Google Cloud 프로젝트(또는 해당 구글 계정의 무료 티어 전체)**의 API 호출이 차단되었습니다.
+        
+        **🛠️ 가장 빠르고 확실한 해결 방법 (1분 소요):**
+        1. **다른 구글 계정(개인 @gmail.com 다른 계정)**으로 [Google AI Studio (https://aistudio.google.com/)](https://aistudio.google.com/)에 로그인합니다.
+        2. 좌측 메뉴의 **Get API key**를 클릭한 후, **'Create API key in new project'** 버튼으로 새 API 키를 발급받습니다.
+        3. 새로 발급받은 API 키를 왼쪽 사이드바에 붙여넣으시면 **즉시 100% 정상 작동**합니다!
+        """)
+        with st.expander("🔍 상세 오류 내용 (Google API 반환 메시지)"):
+            st.code(err_str, language="text")
     elif "403" in err_str or "PERMISSION_DENIED" in err_str:
         st.error("🚫 **API 접근 권한 거부 오류 (403 PERMISSION_DENIED)**")
         st.warning("""
         **🔍 원인 & 해결 방법:**
         
-        1. **학교/회사(Google Workspace) 계정 차단 (가장 흔한 원인)**:
-           - 학교(@ac.kr, @edu)나 기업 구글 계정으로 AI Studio에 로그인한 경우 조직 보안 정책상 Gemini API 접근이 차단됩니다.
-           - 👉 **개인 구글 계정(@gmail.com)**으로 [Google AI Studio (https://aistudio.google.com/)](https://aistudio.google.com/)에 로그인하여 API 키를 발급받으세요.
+        1. **다른 구글 계정(@gmail.com) 사용 (권장)**:
+           - 현재 구글 계정의 프로젝트가 차단되었거나, 학교/회사(Google Workspace) 보안 정책으로 Gemini API가 차단된 경우입니다.
+           - 👉 **다른 개인 구글 계정(@gmail.com)**으로 [Google AI Studio](https://aistudio.google.com/)에 접속하여 새 키를 발급받으세요.
            
-        2. **사이드바 모델 선택**:
-           - 왼쪽 사이드바의 **[Gemini 모델 선택]**에서 최신 권장 모델인 **`Gemini 3.8 Flash (최신 기본/권장)`**을 선택해 주세요.
-           
-        3. **새 프로젝트에서 API 키 발급**:
+        2. **새 프로젝트에서 API 키 발급**:
            - [Google AI Studio (Get API key)](https://aistudio.google.com/)에서 기존 프로젝트 대신 **'Create API key in new project'** 버튼으로 완전히 새로운 프로젝트에서 발급받으세요.
         """)
         with st.expander("🔍 상세 오류 내용 (Google API 반환 메시지 확인)"):
