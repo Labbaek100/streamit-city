@@ -1,6 +1,13 @@
-streamlit>=1.30.0
-google-genai>=0.1.1
-plotly>=5.18.0
+# Streamlit 웹 대시보드 프레임워크
+streamlit>=1.35.0
+
+# Google GenAI 공식 최신 SDK (Gemini 3.8 Flash / Thinking Config 지원)
+google-genai>=0.8.0
+
+# 데이터 처리 및 시각화 라이브러리
 pandas>=2.0.0
 numpy>=1.24.0
+plotly>=5.18.0
+
+# 학습 교안 및 포트폴리오 Word(.docx) 다운로드 지원
 python-docx>=1.1.0

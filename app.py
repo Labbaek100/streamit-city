@@ -1,4 +1,5 @@
 import streamlit as st
+import os
 import json
 import io
 from datetime import datetime
@@ -229,7 +230,8 @@ with st.sidebar:
     st.markdown("---")
     
     # API Key Settings
-    api_key = st.text_input("Gemini API Key", type="password", help="Google AI Studio에서 발급받은 API Key를 입력하세요.")
+    default_key = os.environ.get("GEMINI_API_KEY", "")
+    api_key = st.text_input("Gemini API Key", value=default_key, type="password", help="Google AI Studio에서 발급받은 API Key를 입력하세요.")
     
     if not api_key:
         st.warning("⚠️ Google AI Studio에서 발급받은 API Key를 입력해주세요. [API Key 발급하기](https://aistudio.google.com/)")
@@ -252,8 +254,10 @@ with st.sidebar:
     
     # Supported Google AI Gemini Models
     MODEL_MAP = {
-        "Gemini 3.1 Pro (요청 모델)": "gemini-3.1-pro",
-        "Gemini 3.8 Flash (최신 권장)": "gemini-3.8-flash",
+        "Gemini 3.8 Flash Low (요청 권장)": "gemini-3.8-flash",
+        "Gemini 3.8 Flash (최신 기본)": "gemini-3.8-flash",
+        "Gemini 3.8 Flash Low (ID: gemini-3.8-flash-low)": "gemini-3.8-flash-low",
+        "Gemini 2.0 Flash": "gemini-2.0-flash",
         "Gemini 1.5 Flash (레거시 표준)": "gemini-1.5-flash",
         "Gemini 1.5 Pro (레거시 전문가)": "gemini-1.5-pro",
         "직접 입력 (Custom ID)": "custom"
@@ -263,11 +267,11 @@ with st.sidebar:
         "Gemini 모델 선택",
         options=list(MODEL_MAP.keys()),
         index=0,
-        help="Google AI Studio 모델 목록입니다. 3.1 Pro 또는 3.8 Flash를 사용할 수 있습니다."
+        help="Google AI Studio 모델 목록입니다. 요청하신 Gemini 3.8 Flash Low 버전이 기본 적용됩니다."
     )
     
     if MODEL_MAP[selected_model_label] == "custom":
-        model_choice = st.text_input("모델 ID 직접 입력", value="gemini-2.5-flash", help="사용하고자 하는 정확한 Gemini 모델 ID를 입력하세요.")
+        model_choice = st.text_input("모델 ID 직접 입력", value="gemini-3.8-flash", help="사용하고자 하는 정확한 Gemini 모델 ID를 입력하세요.")
     else:
         model_choice = MODEL_MAP[selected_model_label]
         
@@ -356,42 +360,105 @@ def get_gemini_client():
         st.error(f"클라이언트 초기화 오류: {e}")
         return None
 
+def get_available_models(client):
+    """API Key로 실제 사용 가능한 Gemini 모델 목록 조회"""
+    try:
+        models = []
+        for m in client.models.list():
+            name = getattr(m, 'name', '')
+            if name.startswith('models/'):
+                name = name[len('models/'):]
+            if name:
+                models.append(name)
+        return models
+    except Exception:
+        return []
+
 def call_gemini_api(client, contents, chosen_model, temperature=0.7):
     """
     Gemini API 호출 래퍼 함수:
-    404 NOT_FOUND(모델 미지원) 발생 시 공식 안정 모델(gemini-2.5-flash)로 자동 fallback 처리
+    404 NOT_FOUND(모델 미지원) 발생 시 실제 API에서 사용 가능한 모델을 동적으로 탐색하여 자동 fallback 처리
     """
+    config_params = {
+        "system_instruction": SYSTEM_INSTRUCTION,
+        "temperature": temperature
+    }
+    
+    # ThinkingConfig 지원 시 low thinking budget 설정 시도
+    if hasattr(types, "ThinkingConfig"):
+        try:
+            config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=1024)
+        except Exception:
+            pass
+
+    config = types.GenerateContentConfig(**config_params)
+
+    # 1. 1차 시도 (요청된 모델)
     try:
         response = client.models.generate_content(
             model=chosen_model,
             contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                temperature=temperature
-            )
+            config=config
         )
         return response.text
     except Exception as e:
         err_msg = str(e)
+        # 만약 thinking_config 파라미터가 거부된 경우 기본 config로 1회 재시도
+        if "thinking_config" in err_msg or "ThinkingConfig" in err_msg or "INVALID_ARGUMENT" in err_msg:
+            try:
+                base_config = types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    temperature=temperature
+                )
+                response = client.models.generate_content(
+                    model=chosen_model,
+                    contents=contents,
+                    config=base_config
+                )
+                return response.text
+            except Exception as retry_err:
+                err_msg = str(retry_err)
+                e = retry_err
+
+        # 2. 404 NOT_FOUND 발생 시 지능형 Fallback 처리
         if "404" in err_msg or "NOT_FOUND" in err_msg:
-            # Fallback to standard official models
-            fallback_models = ["gemini-3.8-flash", "gemini-3.1-pro", "gemini-1.5-flash", "gemini-1.5-pro"]
-            for fb_model in fallback_models:
-                if fb_model != chosen_model:
-                    try:
-                        st.info(f"ℹ️ 선택된 모델(`{chosen_model}`)이 제공되지 않아 공식 모델(`{fb_model}`)로 자동 전환하여 응답을 생성합니다.")
-                        response = client.models.generate_content(
-                            model=fb_model,
-                            contents=contents,
-                            config=types.GenerateContentConfig(
-                                system_instruction=SYSTEM_INSTRUCTION,
-                                temperature=temperature
-                            )
-                        )
-                        return response.text
-                    except Exception:
-                        continue
-        # Re-raise if fallback failed or other errors
+            available = get_available_models(client)
+            fallback_candidates = []
+            
+            # 동적 모델 목록 우선 검사
+            for m in available:
+                if "3.8" in m and "flash" in m and m != chosen_model and m not in fallback_candidates:
+                    fallback_candidates.append(m)
+            for m in available:
+                if "flash" in m and m != chosen_model and m not in fallback_candidates:
+                    fallback_candidates.append(m)
+            for m in available:
+                if "gemini" in m and m != chosen_model and m not in fallback_candidates:
+                    fallback_candidates.append(m)
+                    
+            # 정적 예비 후보군 (동적 조회가 비어있을 때 대비)
+            static_fallbacks = ["gemini-3.8-flash", "gemini-3.8-flash-low", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+            for sf in static_fallbacks:
+                if sf != chosen_model and sf not in fallback_candidates:
+                    fallback_candidates.append(sf)
+                    
+            for fb_model in fallback_candidates:
+                try:
+                    fb_config = types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        temperature=temperature
+                    )
+                    response = client.models.generate_content(
+                        model=fb_model,
+                        contents=contents,
+                        config=fb_config
+                    )
+                    st.info(f"ℹ️ 선택된 모델(`{chosen_model}`)을 사용할 수 없어 사용 가능한 모델(`{fb_model}`)로 자동 전환하여 완료했습니다.")
+                    return response.text
+                except Exception:
+                    continue
+                    
+        # 모든 fallback 시도 실패 시 원래 에러 반환
         raise e
 
 # ==========================================
