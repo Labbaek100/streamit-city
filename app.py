@@ -250,13 +250,28 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Settings and Controls (Defaulted to Gemini 3.8 Flash Medium)
-    model_choice = st.selectbox(
+    # Supported Google AI Gemini Models
+    MODEL_MAP = {
+        "Gemini 3.1 Pro (요청 모델)": "gemini-3.1-pro",
+        "Gemini 3.8 Flash (최신 권장)": "gemini-3.8-flash",
+        "Gemini 1.5 Flash (레거시 표준)": "gemini-1.5-flash",
+        "Gemini 1.5 Pro (레거시 전문가)": "gemini-1.5-pro",
+        "직접 입력 (Custom ID)": "custom"
+    }
+    
+    selected_model_label = st.selectbox(
         "Gemini 모델 선택",
-        options=["gemini-3.8-flash-medium", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
+        options=list(MODEL_MAP.keys()),
         index=0,
-        help="사용할 Gemini 모델을 선택하세요. 기본 모델은 Gemini 3.8 Flash Medium입니다."
+        help="Google AI Studio 모델 목록입니다. 3.1 Pro 또는 3.8 Flash를 사용할 수 있습니다."
     )
+    
+    if MODEL_MAP[selected_model_label] == "custom":
+        model_choice = st.text_input("모델 ID 직접 입력", value="gemini-2.5-flash", help="사용하고자 하는 정확한 Gemini 모델 ID를 입력하세요.")
+    else:
+        model_choice = MODEL_MAP[selected_model_label]
+        
+    st.caption(f"선택된 모델 ID: `{model_choice}`")
     
     st.markdown("---")
     st.markdown("### 📥 **종합 학습 포트폴리오**")
@@ -341,6 +356,44 @@ def get_gemini_client():
         st.error(f"클라이언트 초기화 오류: {e}")
         return None
 
+def call_gemini_api(client, contents, chosen_model, temperature=0.7):
+    """
+    Gemini API 호출 래퍼 함수:
+    404 NOT_FOUND(모델 미지원) 발생 시 공식 안정 모델(gemini-2.5-flash)로 자동 fallback 처리
+    """
+    try:
+        response = client.models.generate_content(
+            model=chosen_model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=temperature
+            )
+        )
+        return response.text
+    except Exception as e:
+        err_msg = str(e)
+        if "404" in err_msg or "NOT_FOUND" in err_msg:
+            # Fallback to standard official models
+            fallback_models = ["gemini-3.8-flash", "gemini-3.1-pro", "gemini-1.5-flash", "gemini-1.5-pro"]
+            for fb_model in fallback_models:
+                if fb_model != chosen_model:
+                    try:
+                        st.info(f"ℹ️ 선택된 모델(`{chosen_model}`)이 제공되지 않아 공식 모델(`{fb_model}`)로 자동 전환하여 응답을 생성합니다.")
+                        response = client.models.generate_content(
+                            model=fb_model,
+                            contents=contents,
+                            config=types.GenerateContentConfig(
+                                system_instruction=SYSTEM_INSTRUCTION,
+                                temperature=temperature
+                            )
+                        )
+                        return response.text
+                    except Exception:
+                        continue
+        # Re-raise if fallback failed or other errors
+        raise e
+
 # ==========================================
 # 6. NAVIGATION MODULE CONTROLLER
 # ==========================================
@@ -404,15 +457,13 @@ if "1단계" in menu:
                             """
                             
                             try:
-                                response = client.models.generate_content(
-                                    model=model_choice,
+                                result_text = call_gemini_api(
+                                    client=client,
                                     contents=prompt,
-                                    config=types.GenerateContentConfig(
-                                        system_instruction=SYSTEM_INSTRUCTION,
-                                        temperature=0.7
-                                    )
+                                    chosen_model=model_choice,
+                                    temperature=0.7
                                 )
-                                st.session_state.concept_output[selected_sub] = response.text
+                                st.session_state.concept_output[selected_sub] = result_text
                             except Exception as e:
                                 st.error(f"콘텐츠 생성 중 오류가 발생했습니다: {e}")
                                 
@@ -524,17 +575,15 @@ elif "2단계" in menu:
                     """
                     
                     try:
-                        response = client.models.generate_content(
-                            model=model_choice,
+                        result_feedback = call_gemini_api(
+                            client=client,
                             contents=prompt,
-                            config=types.GenerateContentConfig(
-                                system_instruction=SYSTEM_INSTRUCTION,
-                                temperature=0.5
-                            )
+                            chosen_model=model_choice,
+                            temperature=0.5
                         )
                         st.session_state.scenario_feedback[selected_scenario_name] = {
                             "proposal": student_proposal,
-                            "feedback": response.text
+                            "feedback": result_feedback
                         }
                     except Exception as e:
                         st.error(f"피드백 생성 중 오류가 발생했습니다: {e}")
@@ -650,7 +699,7 @@ else:
                         data=chat_docx,
                         file_name=f"도시계획_튜터링_대화록_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        key="dl_chat_docx",
+                        key=f"dl_chat_docx",
                         use_container_width=True
                     )
         st.markdown("---")
@@ -689,16 +738,12 @@ else:
                         )
                         
                     try:
-                        response = client.models.generate_content(
-                            model=model_choice,
+                        assistant_response = call_gemini_api(
+                            client=client,
                             contents=contents_payload,
-                            config=types.GenerateContentConfig(
-                                system_instruction=SYSTEM_INSTRUCTION,
-                                temperature=0.7
-                            )
+                            chosen_model=model_choice,
+                            temperature=0.7
                         )
-                        
-                        assistant_response = response.text
                         message_placeholder.markdown(assistant_response)
                         st.session_state.messages.append({"role": "assistant", "content": assistant_response})
                         st.rerun()
