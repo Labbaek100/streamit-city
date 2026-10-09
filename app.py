@@ -231,10 +231,15 @@ with st.sidebar:
     
     # API Key Settings
     default_key = os.environ.get("GEMINI_API_KEY", "")
-    api_key = st.text_input("Gemini API Key", value=default_key, type="password", help="Google AI Studio에서 발급받은 API Key를 입력하세요.")
+    api_key_raw = st.text_input("Gemini API Key", value=default_key, type="password", help="Google AI Studio에서 발급받은 영문/숫자 API Key를 입력하세요.")
+    api_key = api_key_raw.strip().strip("'\"").strip() if api_key_raw else ""
     
+    # Check if API Key contains non-ASCII (e.g. Korean) characters
+    has_non_ascii_key = bool(api_key and any(ord(c) > 127 for c in api_key))
     if not api_key:
         st.warning("⚠️ Google AI Studio에서 발급받은 API Key를 입력해주세요. [API Key 발급하기](https://aistudio.google.com/)")
+    elif has_non_ascii_key:
+        st.error("❌ 입력된 API Key에 한글이나 잘못된 문자가 포함되어 있습니다! 복사할 때 한글이 섞이지 않은 순수 영문/숫자 키(`AIzaSy...`)를 입력해주세요.")
     else:
         st.success("API Key가 준비되었습니다.", icon="🔑")
         
@@ -271,7 +276,13 @@ with st.sidebar:
     )
     
     if MODEL_MAP[selected_model_label] == "custom":
-        model_choice = st.text_input("모델 ID 직접 입력", value="gemini-3.8-flash", help="사용하고자 하는 정확한 Gemini 모델 ID를 입력하세요.")
+        custom_input = st.text_input("모델 ID 직접 입력", value="gemini-3.8-flash", help="사용하고자 하는 정확한 Gemini 모델 ID를 입력하세요.")
+        clean_custom = custom_input.strip().strip("'\"").strip()
+        if any(ord(c) > 127 for c in clean_custom):
+            st.error("❌ 모델 ID에는 한글을 사용할 수 없습니다. (예: gemini-3.8-flash)")
+            model_choice = "gemini-3.8-flash"
+        else:
+            model_choice = clean_custom
     else:
         model_choice = MODEL_MAP[selected_model_label]
         
@@ -352,9 +363,13 @@ SYSTEM_INSTRUCTION = """
 def get_gemini_client():
     if not api_key:
         return None
+    clean_key = api_key.strip().strip("'\"").strip()
+    if any(ord(c) > 127 for c in clean_key):
+        st.error("❌ API Key에 한글이나 잘못된 문자가 포함되어 있어 연결할 수 없습니다. 올바른 영문 API Key를 입력해주세요.")
+        return None
     try:
         # Initialize the official google-genai client
-        client = genai.Client(api_key=api_key)
+        client = genai.Client(api_key=clean_key)
         return client
     except Exception as e:
         st.error(f"클라이언트 초기화 오류: {e}")
@@ -461,6 +476,35 @@ def call_gemini_api(client, contents, chosen_model, temperature=0.7):
         # 모든 fallback 시도 실패 시 원래 에러 반환
         raise e
 
+def handle_api_error(e, context="콘텐츠 생성"):
+    """API 호출 에러 처리 및 사용자 친화적 가이드 출력"""
+    err_str = str(e)
+    if "ascii" in err_str and "encode" in err_str:
+        st.error("⚠️ **API 키 또는 모델 ID 입력 문자 인코딩 오류 ('ascii' codec error)**")
+        st.warning("""
+        **🔍 원인:**
+        사이드바의 **API Key** 입력창이나 모델 ID에 **한글** 또는 **잘못된 특수문자**가 섞여 있어 HTTP 통신 중 오류가 발생했습니다.
+        
+        **🛠️ 해결 방법:**
+        1. 왼쪽 사이드바의 **Gemini API Key** 입력창을 확인해주세요.
+        2. 한글이 함께 복사되었거나 오타가 난 부분을 지우고, Google AI Studio에서 복사한 **순수 영문/숫자 키(`AIzaSy...`로 시작하는 형태)**만 남겨주세요.
+        3. 모델 선택을 '직접 입력'으로 하신 경우 한글이 아닌 영문 모델 ID(`gemini-3.8-flash`)를 입력해주세요.
+        """)
+    elif "403" in err_str or "PERMISSION_DENIED" in err_str:
+        st.error("🚫 **API 접근 권한 거부 오류 (403 PERMISSION_DENIED)**")
+        st.warning("""
+        **🔍 원인:**
+        현재 사이드바에 입력된 Google AI Studio API 키(또는 연결된 GCP 프로젝트)가 Google 측에서 비활성화되었거나 접근이 차단(Denied)된 상태입니다.
+        
+        **🛠️ 해결 방법 (새 API 키 발급, 약 1분 소요):**
+        1. [Google AI Studio (https://aistudio.google.com/)](https://aistudio.google.com/)에 접속합니다.
+        2. 좌측 메뉴의 **Get API key**를 클릭합니다.
+        3. 기존 키 대신 **'Create API key in new project'** 버튼을 클릭하여 새 프로젝트에서 깨끗한 새 API 키를 생성합니다.
+        4. 새로 발급받은 API 키를 복사한 후, 왼쪽 사이드바의 **Gemini API Key** 입력창에 붙여넣으시면 즉시 정상 작동합니다!
+        """)
+    else:
+        st.error(f"{context} 중 오류가 발생했습니다: {e}")
+
 # ==========================================
 # 6. NAVIGATION MODULE CONTROLLER
 # ==========================================
@@ -532,7 +576,7 @@ if "1단계" in menu:
                                 )
                                 st.session_state.concept_output[selected_sub] = result_text
                             except Exception as e:
-                                st.error(f"콘텐츠 생성 중 오류가 발생했습니다: {e}")
+                                handle_api_error(e, "개념 교안 생성")
                                 
             # Show cached concept output
             if selected_sub in st.session_state.concept_output:
@@ -653,7 +697,7 @@ elif "2단계" in menu:
                             "feedback": result_feedback
                         }
                     except Exception as e:
-                        st.error(f"피드백 생성 중 오류가 발생했습니다: {e}")
+                        handle_api_error(e, "시나리오 평가 피드백 생성")
                         
     # Show cached feedback
     if selected_scenario_name in st.session_state.scenario_feedback:
@@ -816,4 +860,4 @@ else:
                         st.rerun()
                     except Exception as e:
                         message_placeholder.empty()
-                        st.error(f"답변 생성 오류가 발생했습니다: {e}")
+                        handle_api_error(e, "AI 튜터 답변 생성")
