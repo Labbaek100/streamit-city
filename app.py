@@ -259,12 +259,11 @@ with st.sidebar:
     
     # Supported Google AI Gemini Models
     MODEL_MAP = {
-        "Gemini 3.8 Flash Low (요청 권장)": "gemini-3.8-flash",
-        "Gemini 3.8 Flash (최신 기본)": "gemini-3.8-flash",
-        "Gemini 3.8 Flash Low (ID: gemini-3.8-flash-low)": "gemini-3.8-flash-low",
-        "Gemini 2.0 Flash": "gemini-2.0-flash",
-        "Gemini 1.5 Flash (레거시 표준)": "gemini-1.5-flash",
-        "Gemini 1.5 Pro (레거시 전문가)": "gemini-1.5-pro",
+        "Gemini 2.0 Flash (권장, 최신 고속)": "gemini-2.0-flash",
+        "Gemini 1.5 Flash (안정적 표준)": "gemini-1.5-flash",
+        "Gemini 1.5 Pro (전문가 심층 분석)": "gemini-1.5-pro",
+        "Gemini 2.5 Flash": "gemini-2.5-flash",
+        "Gemini 3.8 Flash (실험/맞춤형)": "gemini-3.8-flash",
         "직접 입력 (Custom ID)": "custom"
     }
     
@@ -272,15 +271,15 @@ with st.sidebar:
         "Gemini 모델 선택",
         options=list(MODEL_MAP.keys()),
         index=0,
-        help="Google AI Studio 모델 목록입니다. 요청하신 Gemini 3.8 Flash Low 버전이 기본 적용됩니다."
+        help="Google AI Studio 정식 지원 모델 목록입니다. 최신 초고속 모델인 Gemini 2.0 Flash가 기본 적용됩니다."
     )
     
     if MODEL_MAP[selected_model_label] == "custom":
-        custom_input = st.text_input("모델 ID 직접 입력", value="gemini-3.8-flash", help="사용하고자 하는 정확한 Gemini 모델 ID를 입력하세요.")
+        custom_input = st.text_input("모델 ID 직접 입력", value="gemini-2.0-flash", help="사용하고자 하는 정확한 Gemini 모델 ID를 입력하세요.")
         clean_custom = custom_input.strip().strip("'\"").strip()
         if any(ord(c) > 127 for c in clean_custom):
-            st.error("❌ 모델 ID에는 한글을 사용할 수 없습니다. (예: gemini-3.8-flash)")
-            model_choice = "gemini-3.8-flash"
+            st.error("❌ 모델 ID에는 한글을 사용할 수 없습니다. (예: gemini-2.0-flash)")
+            model_choice = "gemini-2.0-flash"
         else:
             model_choice = clean_custom
     else:
@@ -435,43 +434,26 @@ def call_gemini_api(client, contents, chosen_model, temperature=0.7):
                 err_msg = str(retry_err)
                 e = retry_err
 
-        # 2. 404 NOT_FOUND 발생 시 지능형 Fallback 처리
-        if "404" in err_msg or "NOT_FOUND" in err_msg:
-            available = get_available_models(client)
-            fallback_candidates = []
-            
-            # 동적 모델 목록 우선 검사
-            for m in available:
-                if "3.8" in m and "flash" in m and m != chosen_model and m not in fallback_candidates:
-                    fallback_candidates.append(m)
-            for m in available:
-                if "flash" in m and m != chosen_model and m not in fallback_candidates:
-                    fallback_candidates.append(m)
-            for m in available:
-                if "gemini" in m and m != chosen_model and m not in fallback_candidates:
-                    fallback_candidates.append(m)
-                    
-            # 정적 예비 후보군 (동적 조회가 비어있을 때 대비)
-            static_fallbacks = ["gemini-3.8-flash", "gemini-3.8-flash-low", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
-            for sf in static_fallbacks:
-                if sf != chosen_model and sf not in fallback_candidates:
-                    fallback_candidates.append(sf)
-                    
-            for fb_model in fallback_candidates:
-                try:
-                    fb_config = types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION,
-                        temperature=temperature
-                    )
-                    response = client.models.generate_content(
-                        model=fb_model,
-                        contents=contents,
-                        config=fb_config
-                    )
-                    st.info(f"ℹ️ 선택된 모델(`{chosen_model}`)을 사용할 수 없어 사용 가능한 모델(`{fb_model}`)로 자동 전환하여 완료했습니다.")
-                    return response.text
-                except Exception:
-                    continue
+        # 2. 모델 관련 오류(404 NOT_FOUND, 403 PERMISSION_DENIED, INVALID_ARGUMENT 등) 발생 시 안전한 표준 모델로 지능형 자동 Fallback
+        # (구글 AI 스튜디오에서 정식 지원하는 gemini-2.0-flash -> gemini-1.5-flash 순으로 순차 자동 시도)
+        fallback_candidates = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+        for fb_model in fallback_candidates:
+            if fb_model == chosen_model:
+                continue
+            try:
+                fb_config = types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    temperature=temperature
+                )
+                response = client.models.generate_content(
+                    model=fb_model,
+                    contents=contents,
+                    config=fb_config
+                )
+                st.info(f"ℹ️ 선택된 모델(`{chosen_model}`) 호출 실패로 정식 지원 모델(`{fb_model}`)로 자동 전환하여 완료했습니다.")
+                return response.text
+            except Exception:
+                continue
                     
         # 모든 fallback 시도 실패 시 원래 에러 반환
         raise e
@@ -488,22 +470,29 @@ def handle_api_error(e, context="콘텐츠 생성"):
         **🛠️ 해결 방법:**
         1. 왼쪽 사이드바의 **Gemini API Key** 입력창을 확인해주세요.
         2. 한글이 함께 복사되었거나 오타가 난 부분을 지우고, Google AI Studio에서 복사한 **순수 영문/숫자 키(`AIzaSy...`로 시작하는 형태)**만 남겨주세요.
-        3. 모델 선택을 '직접 입력'으로 하신 경우 한글이 아닌 영문 모델 ID(`gemini-3.8-flash`)를 입력해주세요.
+        3. 모델 선택을 '직접 입력'으로 하신 경우 한글이 아닌 영문 모델 ID(`gemini-2.0-flash`)를 입력해주세요.
         """)
     elif "403" in err_str or "PERMISSION_DENIED" in err_str:
         st.error("🚫 **API 접근 권한 거부 오류 (403 PERMISSION_DENIED)**")
         st.warning("""
-        **🔍 원인:**
-        현재 사이드바에 입력된 Google AI Studio API 키(또는 연결된 GCP 프로젝트)가 Google 측에서 비활성화되었거나 접근이 차단(Denied)된 상태입니다.
+        **🔍 원인 & 해결 방법:**
         
-        **🛠️ 해결 방법 (새 API 키 발급, 약 1분 소요):**
-        1. [Google AI Studio (https://aistudio.google.com/)](https://aistudio.google.com/)에 접속합니다.
-        2. 좌측 메뉴의 **Get API key**를 클릭합니다.
-        3. 기존 키 대신 **'Create API key in new project'** 버튼을 클릭하여 새 프로젝트에서 깨끗한 새 API 키를 생성합니다.
-        4. 새로 발급받은 API 키를 복사한 후, 왼쪽 사이드바의 **Gemini API Key** 입력창에 붙여넣으시면 즉시 정상 작동합니다!
+        1. **학교/회사(Google Workspace) 계정 차단 (가장 흔한 원인)**:
+           - 학교(@ac.kr, @edu)나 기업 구글 계정으로 AI Studio에 로그인한 경우 조직 보안 정책상 Gemini API 접근이 차단됩니다.
+           - 👉 **개인 구글 계정(@gmail.com)**으로 [Google AI Studio (https://aistudio.google.com/)](https://aistudio.google.com/)에 로그인하여 API 키를 발급받으세요.
+           
+        2. **사이드바 모델 선택**:
+           - 왼쪽 사이드바의 **[Gemini 모델 선택]**에서 **`Gemini 2.0 Flash`** 또는 **`Gemini 1.5 Flash`**로 선택되어 있는지 확인하세요.
+           
+        3. **새 프로젝트에서 API 키 발급**:
+           - [Google AI Studio (Get API key)](https://aistudio.google.com/)에서 기존 프로젝트 대신 **'Create API key in new project'** 버튼으로 완전히 새로운 프로젝트에서 발급받으세요.
         """)
+        with st.expander("🔍 상세 오류 내용 (Google API 반환 메시지 확인)"):
+            st.code(err_str, language="text")
     else:
         st.error(f"{context} 중 오류가 발생했습니다: {e}")
+        with st.expander("🔍 상세 오류 내용"):
+            st.code(err_str, language="text")
 
 # ==========================================
 # 6. NAVIGATION MODULE CONTROLLER
@@ -841,9 +830,10 @@ else:
                     contents_payload = []
                     # Keep history for context
                     for msg in st.session_state.messages:
+                        gemini_role = "model" if msg["role"] == "assistant" else "user"
                         contents_payload.append(
                             types.Content(
-                                role=msg["role"],
+                                role=gemini_role,
                                 parts=[types.Part.from_text(text=msg["content"])]
                             )
                         )
