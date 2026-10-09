@@ -259,9 +259,8 @@ with st.sidebar:
     
     # Supported Google AI Gemini Models
     MODEL_MAP = {
-        "Gemini 3.8 Flash (최신 기본/권장)": "gemini-3.8-flash",
-        "Gemini 3.8 Flash (전체 경로 models/)": "models/gemini-3.8-flash",
-        "Gemini 2.5 Flash": "gemini-2.5-flash",
+        "Gemini 3.8 Flash (최신 권장)": "gemini-3.8-flash",
+        "Gemini 3.8 Flash (전체 경로 models/gemini-3.8-flash)": "models/gemini-3.8-flash",
         "직접 입력 (Custom ID)": "custom"
     }
     
@@ -387,17 +386,81 @@ def get_available_models(client):
     except Exception:
         return []
 
+def extract_input_text(contents):
+    """contents(문자열 또는 types.Content 객체 리스트)를 interactions API용 텍스트로 추출"""
+    if isinstance(contents, str):
+        return contents
+    if isinstance(contents, list):
+        dialogue = []
+        for c in contents:
+            role = getattr(c, "role", "") or (c.get("role", "") if isinstance(c, dict) else "")
+            speaker = "학습자" if role in ("user", "") else "교수"
+            
+            parts_text = []
+            parts = getattr(c, "parts", []) or (c.get("parts", []) if isinstance(c, dict) else [])
+            for p in parts:
+                txt = getattr(p, "text", "") or (p.get("text", "") if isinstance(p, dict) else str(p))
+                if txt:
+                    parts_text.append(txt)
+            if parts_text:
+                dialogue.append(f"{speaker}: {' '.join(parts_text)}")
+        return "\n\n".join(dialogue) if dialogue else str(contents)
+    return str(contents)
+
 def call_gemini_api(client, contents, chosen_model, temperature=0.7):
     """
     Gemini API 호출 래퍼 함수:
-    Google AI Studio 최신 권장 모델인 gemini-3.8-flash 최우선 호출 및 자동 fallback 처리
+    1순위: Google 2026 권장 Interactions API (client.interactions.create)
+    2순위: 레거시 Models API (client.models.generate_content)
     """
+    input_text = extract_input_text(contents)
+    last_error = None
+    
+    # 모델 후보군: gemini-3.8-flash 및 경로 표기 변형
+    model_candidates = [chosen_model]
+    if chosen_model.startswith("models/"):
+        model_candidates.append(chosen_model[len("models/"):])
+    else:
+        model_candidates.append(f"models/{chosen_model}")
+        
+    for m in ["gemini-3.8-flash", "models/gemini-3.8-flash"]:
+        if m not in model_candidates:
+            model_candidates.append(m)
+
+    # 1. Google 2026 최신 공식 권장 'Interactions API' 우선 시도
+    if hasattr(client, "interactions") and hasattr(client.interactions, "create"):
+        for m_name in model_candidates:
+            try:
+                try:
+                    res = client.interactions.create(
+                        model=m_name,
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        input=input_text
+                    )
+                except TypeError:
+                    combined_input = f"[도시계획 교수 시스템 지침]\n{SYSTEM_INSTRUCTION}\n\n[학습자 요청]\n{input_text}"
+                    res = client.interactions.create(
+                        model=m_name,
+                        input=combined_input
+                    )
+                    
+                if hasattr(res, "output_text") and res.output_text:
+                    return res.output_text
+                if hasattr(res, "text") and res.text:
+                    return res.text
+                if hasattr(res, "steps"):
+                    for step in res.steps:
+                        if hasattr(step, "text") and step.text:
+                            return step.text
+            except Exception as e_inter:
+                last_error = e_inter
+                continue
+
+    # 2. 레거시 Models API (generate_content) 시도 (Fallback)
     config_params = {
         "system_instruction": SYSTEM_INSTRUCTION,
         "temperature": temperature
     }
-    
-    # ThinkingConfig 지원 시 low thinking budget 설정 시도
     if hasattr(types, "ThinkingConfig"):
         try:
             config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=1024)
@@ -406,33 +469,17 @@ def call_gemini_api(client, contents, chosen_model, temperature=0.7):
 
     config = types.GenerateContentConfig(**config_params)
 
-    # 호출 후보군 구성: 사용자가 선택한 모델 최우선, 경로 표기 변형(models/ 유무) 자동 포함
-    candidates_to_try = [chosen_model]
-    if chosen_model.startswith("models/"):
-        candidates_to_try.append(chosen_model[len("models/"):])
-    else:
-        candidates_to_try.append(f"models/{chosen_model}")
-
-    # 구글 최신 권장 모델 추가
-    for def_m in ["gemini-3.8-flash", "models/gemini-3.8-flash", "gemini-2.5-flash"]:
-        if def_m not in candidates_to_try:
-            candidates_to_try.append(def_m)
-
-    last_error = None
-    for target_model in candidates_to_try:
+    for m_name in model_candidates:
         try:
             response = client.models.generate_content(
-                model=target_model,
+                model=m_name,
                 contents=contents,
                 config=config
             )
-            if target_model != chosen_model:
-                st.info(f"ℹ️ 요청 모델(`{chosen_model}`) 대신 최신 호환 모델(`{target_model}`)로 연결되어 정상 완료되었습니다.")
             return response.text
-        except Exception as e:
-            err_msg = str(e)
-            last_error = e
-            # thinking_config 파라미터가 거부된 경우 기본 config로 1회 재시도
+        except Exception as e_gen:
+            last_error = e_gen
+            err_msg = str(e_gen)
             if "thinking_config" in err_msg or "ThinkingConfig" in err_msg or "INVALID_ARGUMENT" in err_msg:
                 try:
                     base_config = types.GenerateContentConfig(
@@ -440,22 +487,20 @@ def call_gemini_api(client, contents, chosen_model, temperature=0.7):
                         temperature=temperature
                     )
                     response = client.models.generate_content(
-                        model=target_model,
+                        model=m_name,
                         contents=contents,
                         config=base_config
                     )
-                    if target_model != chosen_model:
-                        st.info(f"ℹ️ 최신 호환 모델(`{target_model}`)로 정상 완료되었습니다.")
                     return response.text
                 except Exception as retry_err:
                     last_error = retry_err
             continue
 
-    # 동적 목록에서 사용 가능한 모델 최종 시도
+    # 3. 계정 동적 모델 탐색
     try:
         available = get_available_models(client)
         for dyn_m in available:
-            if dyn_m in candidates_to_try:
+            if dyn_m in model_candidates:
                 continue
             try:
                 base_config = types.GenerateContentConfig(
@@ -474,7 +519,6 @@ def call_gemini_api(client, contents, chosen_model, temperature=0.7):
     except Exception:
         pass
 
-    # 모든 시도 실패 시 마지막 에러 반환
     if last_error:
         raise last_error
     raise RuntimeError("Gemini 모델 호출에 실패했습니다.")
