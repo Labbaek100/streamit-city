@@ -1,11 +1,21 @@
 import streamlit as st
 import json
+import io
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
+
+# python-docx optional import for Word document downloads
+try:
+    import docx
+    from docx.shared import Pt, Inches, RGBColor
+    HAS_DOCX = True
+except ImportError:
+    HAS_DOCX = False
 
 # ==========================================
 # 1. PAGE CONFIGURATION & SESSION STATE
@@ -43,9 +53,96 @@ def reset_session():
     st.toast("학습 진행 상황이 초기화되었습니다.", icon="🔄")
 
 # ==========================================
-# 2. DESIGN SYSTEM & CSS INJECTION
+# 2. DOCUMENT GENERATION HELPERS
 # ==========================================
-# Colors based on Zinc/SaaS styling guidelines
+def create_docx_document(title: str, subtitle: str, sections: list) -> io.BytesIO:
+    """Word (.docx) 문서 생성 헬퍼 함수"""
+    if not HAS_DOCX:
+        return None
+    
+    doc = docx.Document()
+    
+    # Document Title
+    h1 = doc.add_heading(title, level=0)
+    
+    # Subtitle / Metadata
+    meta_p = doc.add_paragraph()
+    meta_p.add_run(f"{subtitle}\n").bold = True
+    meta_p.add_run(f"생성 일시: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 작성 플랫폼: CityCraft AI").italic = True
+    doc.add_paragraph("―" * 40)
+    
+    for sec in sections:
+        level = sec.get("level", 1)
+        doc.add_heading(sec.get("heading", ""), level=level)
+        content = sec.get("content", "")
+        
+        for line in content.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("### "):
+                doc.add_heading(line.replace("### ", ""), level=3)
+            elif line.startswith("## "):
+                doc.add_heading(line.replace("## ", ""), level=2)
+            elif line.startswith("# "):
+                doc.add_heading(line.replace("# ", ""), level=1)
+            elif line.startswith(("- ", "* ")):
+                doc.add_paragraph(line[2:].strip(), style='List Bullet')
+            elif len(line) > 2 and line[0].isdigit() and line[1] == '.':
+                doc.add_paragraph(line[2:].strip(), style='List Number')
+            else:
+                doc.add_paragraph(line)
+        doc.add_paragraph("")
+        
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+def build_portfolio_markdown() -> str:
+    """전체 학습 내용(개념 교안, 시나리오 평가, AI 튜터링)을 취합한 종합 마크다운 보고서 생성"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    lines = [
+        "# 🏙️ CityCraft AI 도시계획 종합 학습 포트폴리오",
+        f"> 생성 일시: {timestamp}",
+        "> 플랫폼: CityCraft AI (도시계획 대학 인터랙티브 학습 공간)\n",
+        "---",
+        "\n## 📌 1단계: 핵심 개념 교안 학습 내역\n"
+    ]
+    
+    if st.session_state.concept_output:
+        for concept_name, content in st.session_state.concept_output.items():
+            lines.append(f"### [개념] {concept_name}\n")
+            lines.append(content)
+            lines.append("\n---\n")
+    else:
+        lines.append("*진행된 개념 학습 내역이 없습니다.*\n\n---\n")
+        
+    lines.append("## 🏙️ 2단계: 가상 도시 문제해결 시나리오 평가 리포트\n")
+    if st.session_state.scenario_feedback:
+        for sc_name, data in st.session_state.scenario_feedback.items():
+            lines.append(f"### [시나리오] {sc_name}\n")
+            lines.append("#### 📝 학생 제출 제안서")
+            lines.append(data.get("proposal", ""))
+            lines.append("\n#### 🎓 전문가(AI 기술사) 정밀 평가 및 피드백")
+            lines.append(data.get("feedback", ""))
+            lines.append("\n---\n")
+    else:
+        lines.append("*제출 및 평가된 시나리오가 없습니다.*\n\n---\n")
+        
+    lines.append("## 💬 3단계: 1:1 도시계획 전문 AI 튜터 상담 대화록\n")
+    if st.session_state.messages:
+        for msg in st.session_state.messages:
+            sender = "👤 학생" if msg["role"] == "user" else "👨‍🏫 도시계획 전문 AI 튜터"
+            lines.append(f"**{sender}**:\n{msg['content']}\n")
+    else:
+        lines.append("*진행된 튜터링 대화 내역이 없습니다.*\n")
+        
+    return "\n".join(lines)
+
+# ==========================================
+# 3. DESIGN SYSTEM & CSS INJECTION
+# ==========================================
 bg = "#09090b" if IS_DARK else "#ffffff"
 bg_subtle = "#0c0c0f" if IS_DARK else "#f9fafb"
 card = "#0c0c0f" if IS_DARK else "#ffffff"
@@ -124,7 +221,7 @@ custom_css = f"""
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ==========================================
-# 3. SIDEBAR CONFIGURATION
+# 4. SIDEBAR CONFIGURATION
 # ==========================================
 with st.sidebar:
     st.markdown("### 🏙️ **CityCraft AI**")
@@ -153,15 +250,67 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Settings and Controls
-    model_choice = st.text_input("Gemini 모델명", value="gemini-2.5-flash", help="사용할 Gemini 모델 파라미터를 입력하세요.")
+    # Settings and Controls (Defaulted to Gemini 3.8 Flash Medium)
+    model_choice = st.selectbox(
+        "Gemini 모델 선택",
+        options=["gemini-3.8-flash-medium", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
+        index=0,
+        help="사용할 Gemini 모델을 선택하세요. 기본 모델은 Gemini 3.8 Flash Medium입니다."
+    )
     
+    st.markdown("---")
+    st.markdown("### 📥 **종합 학습 포트폴리오**")
+    total_items = len(st.session_state.concept_output) + len(st.session_state.scenario_feedback) + (1 if st.session_state.messages else 0)
+    
+    if total_items > 0:
+        portfolio_md = build_portfolio_markdown()
+        st.download_button(
+            label="📄 종합 포트폴리오 (.md)",
+            data=portfolio_md,
+            file_name=f"도시계획_종합포트폴리오_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+            mime="text/markdown",
+            use_container_width=True,
+            key="dl_portfolio_md_sidebar"
+        )
+        
+        if HAS_DOCX:
+            # Word portfolio sections
+            p_sections = []
+            for c_name, c_content in st.session_state.concept_output.items():
+                p_sections.append({"heading": f"[1단계 개념] {c_name}", "content": c_content, "level": 1})
+            for s_name, s_data in st.session_state.scenario_feedback.items():
+                p_sections.append({
+                    "heading": f"[2단계 시나리오] {s_name}",
+                    "content": f"### 학생 제안서\n{s_data.get('proposal', '')}\n\n### 전문가 피드백\n{s_data.get('feedback', '')}",
+                    "level": 1
+                })
+            if st.session_state.messages:
+                chat_txt = "\n\n".join([f"{'학생' if m['role']=='user' else 'AI 튜터'}: {m['content']}" for m in st.session_state.messages])
+                p_sections.append({"heading": "[3단계 1:1 AI 튜터링 대화록]", "content": chat_txt, "level": 1})
+                
+            portfolio_docx = create_docx_document(
+                title="CityCraft AI 도시계획 종합 학습 포트폴리오",
+                subtitle="개념 교안, 시나리오 평가, 전문 상담 종합 리포트",
+                sections=p_sections
+            )
+            if portfolio_docx:
+                st.download_button(
+                    label="📘 종합 포트폴리오 (.docx)",
+                    data=portfolio_docx,
+                    file_name=f"도시계획_종합포트폴리오_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                    key="dl_portfolio_docx_sidebar"
+                )
+    else:
+        st.caption("진행된 학습 내역이 없습니다. 단계를 진행하면 다운로드할 수 있습니다.")
+        
     st.markdown("---")
     if st.button("학습 진행 리셋 (Reset)", use_container_width=True, on_click=reset_session):
         pass
 
 # ==========================================
-# 4. APP HEADER & THEME TOGGLER
+# 5. APP HEADER & THEME TOGGLER
 # ==========================================
 col_header, col_theme = st.columns([10, 2])
 with col_header:
@@ -193,7 +342,7 @@ def get_gemini_client():
         return None
 
 # ==========================================
-# 5. NAVIGATION MODULE CONTROLLER
+# 6. NAVIGATION MODULE CONTROLLER
 # ==========================================
 
 # ------------------------------------------
@@ -221,7 +370,7 @@ if "1단계" in menu:
         with tab:
             category_name = categories_prompt[idx]
             st.markdown(f"### {category_name} 학습")
-            st.markdown(f"`{category_name}` 관련 세부 심화 분석 정보와 우수 국내외 우수 사례를 분석합니다.")
+            st.markdown(f"`{category_name}` 관련 세부 심화 분석 정보와 국내외 우수 사례를 분석합니다.")
             
             # Sub-concept select list
             if idx == 0:
@@ -272,6 +421,38 @@ if "1단계" in menu:
                 st.markdown("---")
                 st.markdown(f"### 📖 {selected_sub} 심화 교안")
                 st.markdown(st.session_state.concept_output[selected_sub])
+                
+                # Download buttons for Concept Material
+                st.markdown("##### 📥 이 개념 교안 다운로드")
+                concept_text = st.session_state.concept_output[selected_sub]
+                concept_md = f"# {selected_sub} 심화 교안\n\n- **분야**: {category_name}\n- **생성 일시**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n- **출처**: CityCraft AI\n\n---\n\n{concept_text}"
+                
+                col_c_d1, col_c_d2 = st.columns(2)
+                with col_c_d1:
+                    st.download_button(
+                        label="📄 마크다운 다운로드 (.md)",
+                        data=concept_md,
+                        file_name=f"{selected_sub}_심화교안.md",
+                        mime="text/markdown",
+                        key=f"dl_concept_md_{selected_sub}",
+                        use_container_width=True
+                    )
+                if HAS_DOCX:
+                    with col_c_d2:
+                        concept_docx = create_docx_document(
+                            title=f"{selected_sub} 심화 교안",
+                            subtitle=f"도시계획 학술 자료 ({category_name})",
+                            sections=[{"heading": selected_sub, "content": concept_text, "level": 1}]
+                        )
+                        if concept_docx:
+                            st.download_button(
+                                label="📘 워드 문서 다운로드 (.docx)",
+                                data=concept_docx,
+                                file_name=f"{selected_sub}_심화교안.docx",
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                key=f"dl_concept_docx_{selected_sub}",
+                                use_container_width=True
+                            )
 
 # ------------------------------------------
 # MODULE 2: SCENARIO WORKSHOP
@@ -370,6 +551,60 @@ elif "2단계" in menu:
             
         st.markdown("#### 🎓 AI 기술사 정밀 피드백")
         st.markdown(saved_data["feedback"])
+        
+        # Download buttons for Scenario Evaluation
+        st.markdown("##### 📥 전문가 평가 내용 및 제안서 다운로드")
+        eval_md = f"""# {selected_scenario_name} - 평가 결과서
+
+> 생성 일시: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  
+> 평가 주관: CityCraft AI 도시계획 기술사 평가위원회  
+
+---
+
+## 1. 대상지 개요
+- **배경 상황**: {scenario_info['background']}
+- **수행 목표**: {scenario_info['target']}
+
+---
+
+## 2. 학생 제출 제안서
+{saved_data['proposal']}
+
+---
+
+## 3. 전문가(AI 기술사) 정밀 평가 및 피드백
+{saved_data['feedback']}
+"""
+        col_sc_d1, col_sc_d2 = st.columns(2)
+        with col_sc_d1:
+            st.download_button(
+                label="📄 평가서 마크다운 다운로드 (.md)",
+                data=eval_md,
+                file_name=f"{selected_scenario_name}_평가결과.md",
+                mime="text/markdown",
+                key=f"dl_eval_md_{selected_scenario_name}",
+                use_container_width=True
+            )
+        if HAS_DOCX:
+            with col_sc_d2:
+                eval_docx = create_docx_document(
+                    title=f"도시계획 시나리오 평가 리포트",
+                    subtitle=f"{selected_scenario_name}",
+                    sections=[
+                        {"heading": "1. 시나리오 대상지 현황", "content": f"배경: {scenario_info['background']}\n목표: {scenario_info['target']}", "level": 1},
+                        {"heading": "2. 학생 정책 제안서", "content": saved_data['proposal'], "level": 1},
+                        {"heading": "3. 전문가 정밀 평가 및 피드백", "content": saved_data['feedback'], "level": 1}
+                    ]
+                )
+                if eval_docx:
+                    st.download_button(
+                        label="📘 평가서 워드 문서 다운로드 (.docx)",
+                        data=eval_docx,
+                        file_name=f"{selected_scenario_name}_평가결과.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key=f"dl_eval_docx_{selected_scenario_name}",
+                        use_container_width=True
+                    )
 
 # ------------------------------------------
 # MODULE 3: AI TUTOR CONSULTATION
@@ -378,6 +613,48 @@ else:
     st.subheader("💬 3단계: 1:1 도시계획 전문 AI 튜터 (AI Consultation)")
     st.markdown("용적률 및 건폐율 계산, 국토의 계획 및 이용에 관한 법률, 도시계획 수립 절차 등 전공 지식에 관한 어떤 질문이든 튜터링을 제공합니다.")
     
+    # Download Chat History if available
+    if st.session_state.messages:
+        chat_md_text = f"# 💬 도시계획 전문 AI 튜터 1:1 상담 대화록\n\n> 일시: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n---\n\n"
+        for msg in st.session_state.messages:
+            speaker = "👤 학생" if msg["role"] == "user" else "👨‍🏫 도시계획 전문 AI 튜터"
+            chat_md_text += f"### {speaker}\n{msg['content']}\n\n"
+            
+        col_chat_d1, col_chat_d2 = st.columns(2)
+        with col_chat_d1:
+            st.download_button(
+                label="📥 상담 대화록 다운로드 (.md)",
+                data=chat_md_text,
+                file_name=f"도시계획_튜터링_대화록_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                mime="text/markdown",
+                key="dl_chat_md",
+                use_container_width=True
+            )
+        if HAS_DOCX:
+            with col_chat_d2:
+                chat_docx = create_docx_document(
+                    title="도시계획 전문 AI 튜터 1:1 상담 대화록",
+                    subtitle="CityCraft AI 인터랙티브 튜터링 기록",
+                    sections=[
+                        {
+                            "heading": "👤 학생 질문" if m["role"] == "user" else "👨‍🏫 AI 튜터 답변",
+                            "content": m["content"],
+                            "level": 2
+                        }
+                        for m in st.session_state.messages
+                    ]
+                )
+                if chat_docx:
+                    st.download_button(
+                        label="📥 상담 대화록 다운로드 (.docx)",
+                        data=chat_docx,
+                        file_name=f"도시계획_튜터링_대화록_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key="dl_chat_docx",
+                        use_container_width=True
+                    )
+        st.markdown("---")
+
     # Display chat history
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -424,6 +701,7 @@ else:
                         assistant_response = response.text
                         message_placeholder.markdown(assistant_response)
                         st.session_state.messages.append({"role": "assistant", "content": assistant_response})
+                        st.rerun()
                     except Exception as e:
                         message_placeholder.empty()
                         st.error(f"답변 생성 오류가 발생했습니다: {e}")
